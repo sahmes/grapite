@@ -1,0 +1,10 @@
+# This is an input to objcopy.
+# The makefile invokes the "ar" tool that breaks extract the objects from the
+# GRAPE library (the ".a" file). The objcopy tool is then used to prefix the
+# following symbols with __grape_, so they could be called  and overridden by
+# grapite functions. Then, "ar" is invoked again to make a new static library.
+g6_open              __grape_g6_open
+g6_set_j_particle    __grape_g6_set_j_particle
+g6calc_firsthalf     __grape_g6calc_firsthalf
+g6calc_lasthalf      __grape_g6calc_lasthalf
+g6_set_ti            __grape_g6_set_ti
