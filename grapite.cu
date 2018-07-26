@@ -56,9 +56,6 @@ class TranslatorClass {
     int OrigToParted(int Index) {
         return ReverseDictionary[Index];
     }
-    int StatusFromOrig(int Index) {
-        return StatusByOriginalIndex[Index];
-    }
   private:
     int N; // Needed?
     thrust::host_vector< thrust::pair<int,int> > Dictionary;
@@ -215,21 +212,25 @@ class JerkCalculatorClass {
         ForcePoly[j].add_to_current(Array);
     }
     void add_jerk(int j, double jerk[3]) {
-        if (PastSteps[j] < (FORCEHISTORY+1)) {memset(jerk, 0, 3*sizeof(double)); return;}
+        if (PastSteps[j] < (FORCEHISTORY+1)) return;
         double Array[3];
         ForcePoly[j].derivnow(Array);
         jerk[0] += Array[0];
         jerk[1] += Array[1];
         jerk[2] += Array[2];
     }
+
     InterPoly *ForcePoly;
     int *PastSteps;
 };
 
 namespace grapite {
+    // Global variables in this namespace
+    int rank; // only needed for debugging purposes
     double ti, t_exp;
     TranslatorClass Translator_j;
     TranslatorClass Translator_i;
+    int *status;
     MemoryBufferClass<3> PositionBuffer;
     MemoryBufferClass<1> MassBuffer;
     Particle *Particles_j;
@@ -244,7 +245,7 @@ namespace grapite {
     vec3 *F, *F_h;
     JerkCalculatorClass JerkCalculator;
 
-    void initialize_globals(int n_loc, int N);
+    void initialize_globals(int N, int n_loc);
     void generate_angular_momentum_mask(int N, double x[][3], double v[][3], int skip, double fraction, int output[]);
     void set_j_particle_pos(int j, double *x);
     void set_j_particle_mass(int j, double m);
@@ -259,10 +260,12 @@ namespace grapite {
 }
 using namespace grapite;
 
-void grapite::initialize_globals(int n_loc, int N) {
+void grapite::initialize_globals(int N, int n_loc) {
     t_exp = 0;
     Translator_j = TranslatorClass(n_loc);
     Translator_i = TranslatorClass(N);
+
+    status = new int[N];
 
     PositionBuffer = MemoryBufferClass<3>(2*N, N); // Minimum max size is N+1 but please use much larger to prevent frequent reorganization!
     MassBuffer = MemoryBufferClass<1>(2*N, N);
@@ -331,7 +334,7 @@ void grapite::set_j_particle_mass(int j, double m) {
 
 int grapite::partition_arrays_i(int n_act, int ind_act[], double x_act_array[][3], double v_act_array[][3], int ind_act_parted[], double x_act_parted[][3], double v_act_parted[][3]) {
     for (int i = 0; i < n_act; i++) {
-        Translator_i.AddParticle(i, Translator_j.StatusFromOrig(ind_act[i]));
+        Translator_i.AddParticle(i, status[ind_act[i]]);
     }
     int N1 = Translator_i.Partition(n_act);
     for (int i = 0; i < n_act; i++) {
@@ -490,13 +493,15 @@ void g6_set_ti(int clusterid, double ti) {
 }
 
 extern "C"
-int grapite_tag_particles(int N, double x[][3], double v[][3], int skip, double fraction) {
-    nj_total = N;
-    initialize_globals(nj_total, nj_total); /// INIT!!!!
-    int *status = new int[nj_total];
-    generate_angular_momentum_mask(nj_total, x, v, skip, fraction, status);
-    for (int j = 0; j < nj_total; j++) Translator_j.AddParticle(j, status[j]);
-    nj_core = Translator_j.Partition(nj_total);
+int grapite_tag_particles(int N, double x[][3], double v[][3], int skip, double fraction, int rank, int n_loc) {
+    grapite::rank = rank;
+    initialize_globals(N, n_loc);
+    nj_total = n_loc;
+    generate_angular_momentum_mask(N, x, v, skip, fraction, status);
+    int j_start = n_loc*rank;
+    int j_end   = n_loc*(rank+1);
+    for (int j = j_start; j < j_end; j++) Translator_j.AddParticle(j-j_start, status[j]);
+    nj_core = Translator_j.Partition(n_loc);
     return nj_core;
 }
 
@@ -505,7 +510,10 @@ extern "C"
 int g6_set_j_particle(int clusterid, int address, int index, double tj, double dtj, double mass,
                       double a2by18[3], double a1by6[3], double aby2[3], double v[3], double x[3]) {
     int new_address = Translator_j.OrigToParted(address);
-    if (new_address < nj_core) __grape_g6_set_j_particle(clusterid, new_address, new_address, tj, dtj, mass, a2by18, a1by6, aby2, v, x);
+    if (new_address < nj_core) __grape_g6_set_j_particle(clusterid, new_address, index, tj, dtj, mass, a2by18, a1by6, aby2, v, x);
+
+
+
     set_j_particle_mass(new_address, mass);
     set_j_particle_pos(new_address, x);
     return 0; // we don't know if there is any meaning to the returned value.
@@ -516,7 +524,6 @@ void g6calc_firsthalf(int clusterid, int nj, int ni, int index[], double xi[][3]
                       double fold[][3], double jold[][3], double phiold[], double eps2, double h2[]) {
     ni_total = ni;
     ni_core = partition_arrays_i(ni, index, xi, vi, index_parted, xi_parted, vi_parted);
-    for (int i = 0; i < ni_total; i++) index_parted[i] = Translator_j.OrigToParted(index_parted[i]);
     __grape_g6calc_firsthalf(clusterid, nj_core, ni_core, index_parted, xi_parted, vi_parted, fold, jold, phiold, eps2, h2);
     if (ti >= t_exp) {
         calculate_expansion();
